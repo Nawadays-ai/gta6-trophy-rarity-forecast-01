@@ -4,61 +4,84 @@
 [![rank](https://make.fun/badge/gta6-trophy-rarity-forecast-01/Nawadays-ai/gta6-trophy-rarity-forecast-01/rank.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
 [![reward](https://make.fun/badge/gta6-trophy-rarity-forecast-01/Nawadays-ai/gta6-trophy-rarity-forecast-01/reward.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
 
-Entry for the make.fun bounty **gta6-trophy-rarity-forecast-01**: forecast,
-for every PlayStation 5 trophy of Grand Theft Auto VI, the percent of
-Exophase-tracked players who will have earned it at 2026-11-26T00:00:00Z, one
-week after launch, as five quantiles (0.05, 0.25, 0.5, 0.75, 0.95) per trophy.
-Scoring is the mean pinball loss on the logit scale; lower is better.
+A dependency-free Python program that forecasts how the earn rate of
+each PlayStation trophy for GTA VI will move between a checkpoint page
+snapshot and a future target time. For every trophy it emits five
+quantiles (5/25/50/75/95) of the predicted earn percentage.
 
-## The program
+## Running it
 
-`main.py` (Python 3, standard library only) is run once per case: it reads
-every `*.in` case file in `$MAKEFUN_INPUT_DIR` (else `/input`), in name order,
-and writes one `<id>.out` per case to `$MAKEFUN_OUTPUT_DIR` (else `/output`).
-Each output is `{"trophies": [{"id": n, "q": [q05, q25, q50, q75, q95]}, ...]}`
-with one row per trophy of the case. It is deterministic: two runs of a case
-write byte-identical files.
+The program is a single file, `main.py`, and needs nothing beyond the
+Python 3 standard library.
 
-## The model
+- It scans the directory named by the `MAKEFUN_INPUT_DIR` environment
+  variable (falling back to `/input`) for `*.in` files, in name order.
+- Each input file is one JSON case: a trophy list, a history of page
+  reads (timestamp, tracked-player count, per-trophy earn rates), the
+  checkpoint time, the target time, the horizon in minutes, and the
+  quantile levels to produce.
+- For each case it writes `<case id>.out` into `MAKEFUN_OUTPUT_DIR`
+  (falling back to `/output`), holding one JSON object with a
+  `trophies` list of `{"id": ..., "q": [...]}` rows.
 
-Earn rates are cumulative and saturate, and the recorded page only changes
-when Exophase refreshes it, so the case history is first reduced to its
-distinct page states. Then, per trophy:
+Run it with:
 
-- a weighted least-squares line is fitted to the logit of the earn rate
-  against ln(1 + hours since the first read), over the last 48 hours of page
-  states, each state weighted by the square root of the hours it stayed on
-  the page;
-- the fitted slope is shrunk toward the pooled slope of the trophy's tier
-  (platinum / gold / silver / bronze), which keeps noisy low-count trophies
-  from extrapolating wildly;
-- the forecast is anchored on the last observed rate and the extrapolated
-  logit move is damped by 0.75, so a saturating adoption curve is not
-  projected through its ceiling;
-- the spread is a normal law on the logit scale combining the fit's residual
-  scale, the slope's standard error over the extrapolation distance, a
-  floor, and a random-walk term whose horizon is measured from the last page
-  change rather than the checkpoint — a stale page is honestly uncertain.
+    python3 main.py
 
-Degenerate inputs (no history, a single page state, a trophy a read never
-listed) fall back to the last known rate under the same spread law, so the
-program always writes a valid forecast.
+The output is deterministic: the same input always produces the same
+bytes. Degenerate inputs (no history, a single page state, trophies
+that were never observed) still yield a valid forecast through a
+conservative fallback path instead of failing.
 
-The configuration was selected on simulated week-one scenarios (saturating
-player growth, per-trophy adoption curves, Exophase's refresh cadence making
-reads stale, idiosyncratic per-trophy noise) scored with an exact replica of
-the official metric: on 80 such scenarios the entry averages a loss of 0.355
-against 0.441 for the persistence baseline and 0.650 for the house curve
-baseline, with 90% interval coverage of 0.987. The practice cases' histories
-are a single flat pre-refresh page, so they exercise the fallback path; their
-server grade is the first real check of the spread under a refresh.
+## How the forecast works
+
+The model works on page states rather than raw reads: consecutive
+reads that show the same player count and the same rates are merged
+into a single state that keeps its first-seen time, and each state is
+weighted by how long it stayed on display.
+
+For every trophy, the earn rate is logit-transformed and regressed
+against log time (ln of one plus the hours since the first state)
+over the last 48 hours before the checkpoint, using a weighted least
+squares fit whose weights are the square roots of the state
+durations. A trophy needs at least three usable points with some
+variation for its own fit; otherwise it borrows strength from its
+rarity tier. Individual slopes are shrunk toward a tier pool, and the
+pool itself is shrunk toward the field-wide median slope, so noisy
+short histories stay close to what comparable trophies are doing.
+
+The forecast is anchored on the last observed rate. The shrunk slope
+moves that anchor toward the target, damped and capped so a single
+trophy cannot leap implausibly far. The spread around the centre
+combines the fit's residual scale, the slope's standard error grown
+over the extrapolation distance, a floor term, and a random-walk term
+that grows with the time since the last page change; trophies without
+their own fit also pick up a term from the spread of observed slopes.
+The interval is asymmetric near the bottom of the scale: as a centre
+approaches the rarest rates, the lower side is squeezed and the upper
+side widened.
+
+Two consistency corrections finish the job. First, an earner floor:
+players who already earned a trophy cannot un-earn it, so the
+predicted rate never falls below the earners already counted divided
+by a projection of the future player pool (a damped, capped
+log-linear projection of the tracked-player count). Second, a
+delayed-wave adjustment for silver and gold trophies that are still
+rare while much of their cohort is stalled: their centre is pulled
+part-way toward a 2 percent reference rate and the upper side is
+widened, with a floor that keeps the lower side reachable. Finally,
+the platinum row is capped level by level at the rarest of the other
+rows whenever the last observed page itself respects that ordering,
+since the platinum cannot be earned more often than the trophies it
+requires.
+
+Quantiles are read directly from the normal distribution at each
+case's own levels — the centre plus the z-score times the appropriate
+side's spread — then clamped to the valid rate range, rounded to four
+decimals, and forced to be non-decreasing.
 
 ## Layout
 
-- `main.py` — the entry program.
-- `LICENSE` — MIT.
-- `.makefun/owner.json` — the entrant wallet for the claim check.
-
-## Submission note
-
-This entry was re-packaged into a fresh repository created after the competition opened. The entrypoint was re-authored in the new repository for the resubmission; the model itself is unchanged from the audit-round-3 configuration described above, and the re-authored program was verified to produce byte-identical output to that configuration on the practice cases and the development test battery.
+- `main.py` — the whole program: input handling, the state
+  reduction, the fits, the forecast, and the output writer.
+- `LICENSE` — the project's licence.
